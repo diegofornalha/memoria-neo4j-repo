@@ -69,7 +69,7 @@ create_backup() {
     # Exportar dados
     echo -e "${YELLOW}  Exportando memórias...${NC}"
     docker exec terminal-neo4j cypher-shell \
-        -u neo4j -p "${NEO4J_PASSWORD:-Cancela@1}" \
+        -u neo4j -p "${NEO4J_PASSWORD:-password}" \
         --format plain << 'CYPHER' | grep "^{" > "${temp_dir}/memories.json" 2>/dev/null || echo "{}" > "${temp_dir}/memories.json"
 CALL {
     MATCH (n)
@@ -204,7 +204,7 @@ restore_backup() {
     # Limpar banco atual
     echo -e "${YELLOW}  Limpando banco atual...${NC}"
     docker exec terminal-neo4j cypher-shell \
-        -u neo4j -p "${NEO4J_PASSWORD:-Cancela@1}" \
+        -u neo4j -p "${NEO4J_PASSWORD:-password}" \
         "MATCH (n) DETACH DELETE n" 2>/dev/null || true
     
     # Restaurar dados
@@ -238,7 +238,7 @@ for cmd in cypher_commands[:10]:  # Limitar para teste
         subprocess.run([
             'docker', 'exec', 'terminal-neo4j', 
             'cypher-shell', '-u', 'neo4j', 
-            '-p', '${NEO4J_PASSWORD:-Cancela@1}',
+            '-p', '${NEO4J_PASSWORD:-password}',
             cmd
         ], capture_output=True)
     except:
@@ -259,13 +259,13 @@ show_stats() {
     
     # Contar nós
     local nodes=$(docker exec terminal-neo4j cypher-shell \
-        -u neo4j -p "${NEO4J_PASSWORD:-Cancela@1}" \
+        -u neo4j -p "${NEO4J_PASSWORD:-password}" \
         "MATCH (n) RETURN count(n)" \
         --format plain 2>/dev/null | grep -o '[0-9]*' | head -1 || echo "0")
     
     # Contar relacionamentos
     local rels=$(docker exec terminal-neo4j cypher-shell \
-        -u neo4j -p "${NEO4J_PASSWORD:-Cancela@1}" \
+        -u neo4j -p "${NEO4J_PASSWORD:-password}" \
         "MATCH ()-[r]->() RETURN count(r)" \
         --format plain 2>/dev/null | grep -o '[0-9]*' | head -1 || echo "0")
     
