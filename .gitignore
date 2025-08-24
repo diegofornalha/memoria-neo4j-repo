@@ -1,0 +1,23 @@
+# Backups locais
+backups/
+*.backup
+*.tar.gz
+*.zip
+
+# Temporários
+*.tmp
+*.log
+*.swp
+.DS_Store
+
+# Credenciais
+.env
+secrets/
+
+# Neo4j dumps
+*.dump
+*.cypher.tmp
+
+# IDE
+.vscode/
+.idea/
