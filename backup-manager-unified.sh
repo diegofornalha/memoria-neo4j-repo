@@ -76,17 +76,61 @@ create_complete_backup() {
 // ========== DADOS EXPORTADOS ==========
 EOF
     
-    # Exportar nós e relacionamentos
+    # Exportar nós em formato CREATE
+    echo "// ========== CRIANDO NÓS ==========" >> "$temp_dir/${backup_name}.cypher"
     docker exec terminal-neo4j cypher-shell \
         -u neo4j -p "${NEO4J_PASSWORD}" \
-        "MATCH (n) RETURN n;" --format plain >> "$temp_dir/${backup_name}.cypher" 2>/dev/null
+        --format plain << 'CYPHER' >> "$temp_dir/${backup_name}.cypher" 2>/dev/null
+MATCH (n)
+WITH n, id(n) as nodeId, labels(n) as lbls, properties(n) as props
+RETURN 
+'CREATE (n' + nodeId + ':' + 
+CASE WHEN size(lbls) > 0 
+     THEN reduce(s = head(lbls), l IN tail(lbls) | s + ':' + l) 
+     ELSE 'Node' 
+END + ' {' +
+CASE WHEN size(keys(props)) > 0 
+     THEN reduce(s = '', k IN keys(props) | 
+          s + CASE WHEN s = '' THEN '' ELSE ', ' END +
+          k + ': ' + 
+          CASE 
+              WHEN props[k] IS NULL THEN 'null'
+              WHEN type(props[k]) = 'STRING' THEN '"' + replace(replace(toString(props[k]), '\\', '\\\\'), '"', '\\"') + '"'
+              WHEN type(props[k]) = 'BOOLEAN' THEN CASE WHEN props[k] THEN 'true' ELSE 'false' END
+              ELSE toString(props[k])
+          END
+     )
+     ELSE ''
+END + '});' as cypher_command
+ORDER BY nodeId;
+CYPHER
     
     echo "" >> "$temp_dir/${backup_name}.cypher"
-    echo "// ========== RELACIONAMENTOS ==========" >> "$temp_dir/${backup_name}.cypher"
+    echo "// ========== CRIANDO RELACIONAMENTOS ==========" >> "$temp_dir/${backup_name}.cypher"
     
     docker exec terminal-neo4j cypher-shell \
         -u neo4j -p "${NEO4J_PASSWORD}" \
-        "MATCH (a)-[r]->(b) RETURN a, r, b;" --format plain >> "$temp_dir/${backup_name}.cypher" 2>/dev/null
+        --format plain << 'CYPHER' >> "$temp_dir/${backup_name}.cypher" 2>/dev/null
+MATCH (a)-[r]->(b)
+WITH a, r, b, id(a) as aId, id(b) as bId, type(r) as relType, properties(r) as props
+RETURN 
+'MATCH (n' + aId + '), (n' + bId + ') ' +
+'WHERE id(n' + aId + ') = ' + aId + ' AND id(n' + bId + ') = ' + bId + ' ' +
+'CREATE (n' + aId + ')-[:' + relType +
+CASE WHEN size(keys(props)) > 0
+     THEN ' {' + reduce(s = '', k IN keys(props) |
+          s + CASE WHEN s = '' THEN '' ELSE ', ' END +
+          k + ': ' +
+          CASE
+              WHEN props[k] IS NULL THEN 'null'
+              WHEN type(props[k]) = 'STRING' THEN '"' + replace(toString(props[k]), '"', '\\"') + '"'
+              ELSE toString(props[k])
+          END
+     ) + '}'
+     ELSE ''
+END + ']->(n' + bId + ');' as cypher_command
+ORDER BY id(r);
+CYPHER
     
     # 2. Obter estatísticas
     local stats=$(docker exec terminal-neo4j cypher-shell \
@@ -128,18 +172,49 @@ Como restaurar:
 2. Executar: docker exec -i terminal-neo4j cypher-shell -u neo4j -p password < ${backup_name}.cypher
 EOF
     
-    # 5. Zipar tudo
+    # 5. Verificar integridade do arquivo .cypher
+    echo -e "${YELLOW}  Verificando integridade...${NC}"
+    local cypher_size=$(du -b "$temp_dir/${backup_name}.cypher" | cut -f1)
+    
+    if [ "$cypher_size" -lt 100 ]; then
+        echo -e "${RED}❌ Erro: Arquivo .cypher muito pequeno (${cypher_size} bytes)${NC}"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # Verificar se contém comandos CREATE
+    if ! grep -q "^CREATE" "$temp_dir/${backup_name}.cypher"; then
+        echo -e "${RED}❌ Erro: Arquivo não contém comandos CREATE válidos${NC}"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    echo -e "${GREEN}  ✅ Arquivo .cypher verificado (${cypher_size} bytes)${NC}"
+    
+    # 6. Zipar tudo
     echo -e "${YELLOW}  Comprimindo backup...${NC}"
     cd "$temp_dir"
-    zip -qr "${BACKUP_DIR}/BACKUP_COMPLETO_NEO4J_${DATE//-/}.zip" .
+    local zip_file="${BACKUP_DIR}/BACKUP_COMPLETO_NEO4J_${DATE//-/}_${TIME//:/-}.zip"
+    zip -qr "$zip_file" .
     cd - > /dev/null
     
-    # Limpar temp
-    rm -rf "$temp_dir"
+    # 7. Verificar ZIP criado
+    if [ -f "$zip_file" ]; then
+        echo -e "${GREEN}  ✅ ZIP criado com sucesso${NC}"
+        # Limpar arquivos temporários e .cypher soltos
+        rm -rf "$temp_dir"
+        rm -f "${BACKUP_DIR}"/*.cypher 2>/dev/null
+        echo -e "${CYAN}  🧹 Arquivos .cypher removidos (mantido apenas ZIP)${NC}"
+    else
+        echo -e "${RED}❌ Erro ao criar ZIP${NC}"
+        rm -rf "$temp_dir"
+        return 1
+    fi
     
     echo -e "${GREEN}✅ Backup completo criado com sucesso!${NC}"
-    echo -e "  📦 Arquivo: ${BACKUP_DIR}/BACKUP_COMPLETO_NEO4J_${DATE//-/}.zip"
+    echo -e "  📦 Arquivo: $zip_file"
     echo -e "  📊 Nós: ${node_count:-0} | Relacionamentos: ${rel_count:-0}"
+    echo -e "  💾 Tamanho: $(du -h "$zip_file" | cut -f1)"
 }
 
 # Função para criar backup simples
