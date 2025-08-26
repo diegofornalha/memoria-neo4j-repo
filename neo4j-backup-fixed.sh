@@ -1,6 +1,6 @@
 #!/bin/bash
-# 🧠 Neo4j Backup - Versão Final Funcional
-# Exporta nós e relacionamentos corretamente
+# 🧠 Neo4j Backup - Versão Corrigida para Capturar TODOS os Nós
+# Exporta nós e relacionamentos usando ID único ao invés de apenas name
 
 set -e
 
@@ -17,7 +17,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║      🧠 Neo4j Backup System v3.0 Final      ║${NC}"
+echo -e "${CYAN}║      🧠 Neo4j Backup System v4.0 FIXED      ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════════╝${NC}\n"
 
 # Verificar Neo4j
@@ -31,7 +31,7 @@ mkdir -p "${BACKUP_DIR}"
 
 # Arquivos temporários
 TEMP_FILE="/tmp/neo4j_backup_${TIMESTAMP}.cypher"
-ZIP_FILE="${BACKUP_DIR}/BACKUP_${TIMESTAMP}.zip"
+ZIP_FILE="${BACKUP_DIR}/BACKUP_FIXED_${TIMESTAMP}.zip"
 
 echo -e "${YELLOW}📊 Coletando estatísticas...${NC}"
 
@@ -42,7 +42,15 @@ NODE_COUNT=$(docker exec terminal-neo4j cypher-shell -u neo4j -p password \
 REL_COUNT=$(docker exec terminal-neo4j cypher-shell -u neo4j -p password \
     "MATCH ()-[r]->() RETURN count(r) as c;" --format plain 2>/dev/null | tail -1)
 
-echo -e "  Nós: ${NODE_COUNT}"
+NODES_WITH_NAME=$(docker exec terminal-neo4j cypher-shell -u neo4j -p password \
+    "MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) as c;" --format plain 2>/dev/null | tail -1)
+
+NODES_WITHOUT_NAME=$(docker exec terminal-neo4j cypher-shell -u neo4j -p password \
+    "MATCH (n) WHERE n.name IS NULL RETURN count(n) as c;" --format plain 2>/dev/null | tail -1)
+
+echo -e "  Total de Nós: ${NODE_COUNT}"
+echo -e "  - Com 'name': ${NODES_WITH_NAME}"
+echo -e "  - Sem 'name': ${NODES_WITHOUT_NAME}"
 echo -e "  Relacionamentos: ${REL_COUNT}"
 
 # Header do backup
@@ -51,7 +59,9 @@ cat > "$TEMP_FILE" << EOF
 // 🧠 Neo4j Memory Backup - Terminal System
 // ================================================
 // Data: $(date)
-// Nós: ${NODE_COUNT}
+// Total de Nós: ${NODE_COUNT}
+// - Nós com 'name': ${NODES_WITH_NAME}
+// - Nós sem 'name': ${NODES_WITHOUT_NAME}
 // Relacionamentos: ${REL_COUNT}
 // ================================================
 // Para restaurar:
@@ -61,33 +71,38 @@ cat > "$TEMP_FILE" << EOF
 
 EOF
 
-echo -e "${YELLOW}📝 Exportando nós...${NC}"
+echo -e "${YELLOW}📝 Exportando TODOS os nós (incluindo sem 'name')...${NC}"
 
-# EXPORTAR NÓS - Processando a saída real do Neo4j
+# EXPORTAR NÓS - Capturando TODOS, incluindo sem name
 echo "// ========== CRIANDO NÓS ==========" >> "$TEMP_FILE"
 
-# Obter todos os nós e processar linha por linha
+# Exportar nós com todas as propriedades usando apoc.export.json
 docker exec terminal-neo4j cypher-shell -u neo4j -p password \
-    "MATCH (n) RETURN n;" --format plain 2>/dev/null | while IFS= read -r line; do
+    "MATCH (n) 
+     WITH n, labels(n) as lbls, properties(n) as props, id(n) as nodeId
+     RETURN lbls, props, nodeId;" --format plain 2>/dev/null | while IFS= read -r line; do
     
     # Pular header
-    if [[ "$line" == "n" ]] || [[ -z "$line" ]]; then
+    if [[ "$line" == "lbls, props, nodeId" ]] || [[ -z "$line" ]]; then
         continue
     fi
     
-    # Processar linha que contém um nó
-    if [[ "$line" =~ ^\(: ]]; then
-        # Remover parênteses externos
-        node_data="${line#(}"
-        node_data="${node_data%)}"
+    # Processar linha com dados do nó
+    if [[ "$line" =~ ^\[(.+)\],\ (\{.*\}),\ ([0-9]+)$ ]]; then
+        labels="${BASH_REMATCH[1]}"
+        props="${BASH_REMATCH[2]}"
+        node_id="${BASH_REMATCH[3]}"
         
-        # Extrair labels (tudo antes do primeiro {)
-        labels="${node_data%%\{*}"
-        labels="${labels#:}"  # Remover : inicial
+        # Limpar labels - remover aspas e espaços
+        labels=$(echo "$labels" | sed 's/"//g' | sed 's/, /:/g')
         
-        # Extrair propriedades (tudo entre { })
-        props="${node_data#*\{}"
-        props="{${props}"
+        # Adicionar propriedade temporária _backup_id para rastrear nós durante restauração
+        if [[ "$props" == "{}" ]]; then
+            props="{_backup_id: ${node_id}}"
+        else
+            # Adicionar _backup_id às propriedades existentes
+            props="${props%\}}, _backup_id: ${node_id}}"
+        fi
         
         # Criar comando CREATE
         echo "CREATE (:${labels} ${props});" >> "$TEMP_FILE"
@@ -95,39 +110,43 @@ docker exec terminal-neo4j cypher-shell -u neo4j -p password \
 done
 
 echo "" >> "$TEMP_FILE"
-echo -e "${YELLOW}📝 Exportando relacionamentos...${NC}"
+echo -e "${YELLOW}📝 Exportando TODOS os relacionamentos...${NC}"
 
-# EXPORTAR RELACIONAMENTOS
+# EXPORTAR RELACIONAMENTOS - Usando ID temporário para mapear
 echo "// ========== CRIANDO RELACIONAMENTOS ==========" >> "$TEMP_FILE"
 
-# Exportar relacionamentos usando o formato correto
+# Exportar relacionamentos usando IDs temporários
 docker exec terminal-neo4j cypher-shell -u neo4j -p password \
-    "MATCH (a)-[r]->(b) WHERE a.name IS NOT NULL AND b.name IS NOT NULL RETURN a.name as from_name, type(r) as rel_type, b.name as to_name, properties(r) as props;" \
+    "MATCH (a)-[r]->(b) 
+     WITH id(a) as fromId, id(b) as toId, type(r) as relType, properties(r) as props
+     RETURN fromId, toId, relType, props;" \
     --format plain 2>/dev/null | while IFS= read -r line; do
     
     # Pular header
-    if [[ "$line" == "from_name, rel_type, to_name, props" ]] || [[ -z "$line" ]]; then
+    if [[ "$line" == "fromId, toId, relType, props" ]] || [[ -z "$line" ]]; then
         continue
     fi
     
     # Processar linha com relacionamento
-    # Formato: "nome1", "TIPO", "nome2", {propriedades}
-    if [[ "$line" =~ \"(.+)\",\ \"(.+)\",\ \"(.+)\",\ (\{.*\}) ]]; then
-        from_name="${BASH_REMATCH[1]}"
-        rel_type="${BASH_REMATCH[2]}"
-        to_name="${BASH_REMATCH[3]}"
+    if [[ "$line" =~ ^([0-9]+),\ ([0-9]+),\ \"(.+)\",\ (\{.*\})$ ]]; then
+        from_id="${BASH_REMATCH[1]}"
+        to_id="${BASH_REMATCH[2]}"
+        rel_type="${BASH_REMATCH[3]}"
         props="${BASH_REMATCH[4]}"
         
-        # Se não há propriedades, props será {}
+        # Criar comando MATCH usando _backup_id
         if [[ "$props" == "{}" ]]; then
-            echo "MATCH (a {name: \"${from_name}\"}), (b {name: \"${to_name}\"}) CREATE (a)-[:${rel_type}]->(b);" >> "$TEMP_FILE"
+            echo "MATCH (a {_backup_id: ${from_id}}), (b {_backup_id: ${to_id}}) CREATE (a)-[:${rel_type}]->(b);" >> "$TEMP_FILE"
         else
-            # Formatar propriedades
-            props_formatted=$(echo "$props" | sed 's/: "/: "/g')
-            echo "MATCH (a {name: \"${from_name}\"}), (b {name: \"${to_name}\"}) CREATE (a)-[:${rel_type} ${props_formatted}]->(b);" >> "$TEMP_FILE"
+            echo "MATCH (a {_backup_id: ${from_id}}), (b {_backup_id: ${to_id}}) CREATE (a)-[:${rel_type} ${props}]->(b);" >> "$TEMP_FILE"
         fi
     fi
 done
+
+# Adicionar comando para limpar propriedades temporárias _backup_id
+echo "" >> "$TEMP_FILE"
+echo "// ========== LIMPANDO PROPRIEDADES TEMPORÁRIAS ==========" >> "$TEMP_FILE"
+echo "MATCH (n) WHERE n._backup_id IS NOT NULL REMOVE n._backup_id;" >> "$TEMP_FILE"
 
 echo "" >> "$TEMP_FILE"
 echo "// ========== FIM DO BACKUP ==========" >> "$TEMP_FILE"
@@ -145,27 +164,34 @@ cat > "$METADATA_FILE" << EOF
 {
     "timestamp": "${TIMESTAMP}",
     "date": "$(date)",
-    "nodes": ${NODE_COUNT},
+    "total_nodes": ${NODE_COUNT},
+    "nodes_with_name": ${NODES_WITH_NAME},
+    "nodes_without_name": ${NODES_WITHOUT_NAME},
     "relationships": ${REL_COUNT},
     "create_commands": ${LINES_CREATE},
     "match_commands": ${LINES_MATCH},
-    "backup_version": "3.0-final"
+    "backup_version": "4.0-fixed"
 }
 EOF
 
 # Criar README
 README_FILE="/tmp/README_${TIMESTAMP}.txt"
 cat > "$README_FILE" << EOF
-Neo4j Backup - Terminal System v3.0
-====================================
+Neo4j Backup - Terminal System v4.0 FIXED
+==========================================
 Data: $(date)
-Nós: ${NODE_COUNT}
+Total de Nós: ${NODE_COUNT}
+- Com 'name': ${NODES_WITH_NAME}
+- Sem 'name': ${NODES_WITHOUT_NAME}
 Relacionamentos: ${REL_COUNT}
 Comandos CREATE: ${LINES_CREATE}
 Comandos MATCH: ${LINES_MATCH}
 
+IMPORTANTE: Esta versão captura TODOS os nós,
+incluindo aqueles sem a propriedade 'name'.
+
 Para restaurar:
-1. unzip BACKUP_${TIMESTAMP}.zip
+1. unzip BACKUP_FIXED_${TIMESTAMP}.zip
 2. docker exec terminal-neo4j cypher-shell -u neo4j -p password "MATCH (n) DETACH DELETE n;"
 3. docker exec -i terminal-neo4j cypher-shell -u neo4j -p password < neo4j_backup_${TIMESTAMP}.cypher
 EOF
@@ -182,21 +208,21 @@ zip -q "$ZIP_FILE" \
 # Limpar temporários
 rm -f "$TEMP_FILE" "$METADATA_FILE" "$README_FILE"
 
-# Limpar arquivos antigos não-ZIP
-find "${BACKUP_DIR}" -type f ! -name "*.zip" -delete 2>/dev/null || true
-
 echo -e "\n${GREEN}╔══════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║       ✅ Backup concluído com sucesso!       ║${NC}"
+echo -e "${GREEN}║    ✅ Backup COMPLETO concluído com sucesso!  ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}\n"
 
 echo -e "📦 Arquivo: ${CYAN}$(basename $ZIP_FILE)${NC}"
-echo -e "📊 Total: ${NODE_COUNT} nós, ${REL_COUNT} relacionamentos"
+echo -e "📊 Total: ${NODE_COUNT} nós (${NODES_WITH_NAME} com name, ${NODES_WITHOUT_NAME} sem name)"
+echo -e "🔗 Relacionamentos: ${REL_COUNT}"
 echo -e "💾 Tamanho: $(du -h "$ZIP_FILE" | cut -f1)"
 
-# Verificar se o backup tem conteúdo
-if [[ "${LINES_CREATE}" == "0" ]]; then
-    echo -e "\n${RED}⚠️ AVISO: Nenhum comando CREATE foi gerado!${NC}"
-    echo -e "${YELLOW}Verifique se o Neo4j tem dados.${NC}"
+# Verificar qualidade do backup
+if [[ "${LINES_CREATE}" -lt "${NODE_COUNT}" ]]; then
+    echo -e "\n${RED}⚠️ AVISO: Apenas ${LINES_CREATE} de ${NODE_COUNT} nós foram exportados!${NC}"
+    echo -e "${YELLOW}Verifique o log de execução para possíveis erros.${NC}"
+else
+    echo -e "\n${GREEN}✅ Backup validado: TODOS os ${NODE_COUNT} nós foram exportados!${NC}"
 fi
 
 echo -e "\n${CYAN}📚 Últimos 3 backups:${NC}"
